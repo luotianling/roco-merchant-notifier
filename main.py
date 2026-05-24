@@ -10,6 +10,8 @@ ROCOM_API_KEY = os.environ.get("ROCOM_API_KEY")
 IMGBB_KEY = os.environ.get("IMGBB_KEY")
 NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID")
 BARK_KEY = os.environ.get("BARK_KEY")
+# 新增：uniCloud 云函数地址（从GitHub Secrets读取）
+UNICLOUD_URL = os.environ.get("UNICLOUD_URL")
 
 GAME_API_URL = "https://wegame.shallow.ink/api/v1/games/rocom/merchant/info"
 NOTIFYME_SERVER = "https://notifyme-server.wzn556.top/api/send"
@@ -267,9 +269,45 @@ def push_all(title, body, markdown, image_url):
             print("✅ Bark 推送已发送")
         except: pass
 
+# ================= 新增：上报数据到 uniCloud =================
+async def send_to_unicloud(status, message, products=None, img_url=None):
+    """
+    自动上报任务执行结果到 uniapp 云开发
+    :param status: 执行状态（成功/失败）
+    :param message: 执行信息
+    :param products: 商品列表
+    :param img_url: 截图地址
+    """
+    if not UNICLOUD_URL:
+        print("ℹ️ 未配置 uniCloud 地址，跳过上报")
+        return
+    
+    try:
+        # 整理要上报的数据（可自定义）
+        report_data = {
+            "task_name": "洛克王国远行商人监控",
+            "status": status,
+            "message": message,
+            "execute_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
+            "current_products": [p["name"] for p in products] if products else [],
+            "product_count": len(products) if products else 0,
+            "screenshot_url": img_url  # 上报截图链接
+        }
+        # 发送到 uniCloud 云函数
+        response = requests.post(
+            UNICLOUD_URL,
+            json=report_data,
+            timeout=15
+        )
+        print(f"✅ 已上报数据到 uniCloud：{response.json()}")
+    except Exception as e:
+        print(f"❌ uniCloud 上报失败：{str(e)}")
+
 # ================= 5. 主入口 =================
 
 async def main():
+    img_url = None
+    products = []
     try:
         resp = requests.get(GAME_API_URL, headers={"X-API-Key": ROCOM_API_KEY}, timeout=30)
         resp.raise_for_status()
@@ -280,16 +318,22 @@ async def main():
     
     if err or not raw_data:
         push_all("⚠️ 监控异常", err or "无法获取数据", "无法获取数据", None)
+        # 上报失败结果
+        await send_to_unicloud("失败", err or "无法获取数据")
         return
 
     processed = process_data_for_template(raw_data)
-    item_names = [p["name"] for p in processed["products"]]
+    products = processed["products"]
+    item_names = [p["name"] for p in products]
     push_body = f"当前售卖: {'、'.join(item_names)}" if item_names else "当前暂无商品"
     
     local_img = await render_to_image(processed)
     img_url = await upload_to_imgbb(local_img)
     
     push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
+    
+    # 新增：上报成功结果 + 商品数据 + 截图
+    await send_to_unicloud("成功", push_body, products, img_url)
 
 if __name__ == "__main__":
     asyncio.run(main())
