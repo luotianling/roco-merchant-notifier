@@ -36,4 +36,6 @@ jobs:
           IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
           NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
+           # uniCloud 云函数地址（新增）
+          UNICLOUD_URL: ${{ secrets.UNICLOUD_URL }}
         run: python main.py
