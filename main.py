@@ -24,8 +24,12 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 # 刷新时间点（北京时间）
 REFRESH_HOURS = [8, 12, 16, 20]
-# 提前排队分钟数
+# 提前排队分钟数（改为2）
 LEAD_MINUTES = 2
+
+# GitHub Actions 事件类型（用于区分定时/手动）
+GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
+IS_MANUAL_TRIGGER = (GITHUB_EVENT_NAME == "workflow_dispatch")
 
 # ================= 2. 时间守卫函数 =================
 
@@ -40,35 +44,21 @@ def should_execute() -> bool:
     允许前后 1 分钟的误差（防止调度器微小偏差）
     """
     now = get_beijing_time()
-    current_hour = now.hour
-    current_minute = now.minute
-
-    # 计算允许执行的时间点列表（例如 07:58, 11:58, 15:58, 19:58）
-    allowed_times = []
+    # 构造计划执行时间点
     for h in REFRESH_HOURS:
-        exec_hour = h
-        exec_minute = 60 - LEAD_MINUTES if LEAD_MINUTES > 0 else 0
-        if LEAD_MINUTES > 0:
-            exec_hour = h - 1 if exec_minute == 60 else h
-            exec_minute = exec_minute % 60
-        # 允许范围：计划时间的前后 1 分钟
-        allowed_times.append((exec_hour, exec_minute, -1, 1))  # (hour, minute, delta_before, delta_after)
-
-    # 更精确：直接构造计划时间点，然后判断 now 是否在 [plan-1min, plan+1min]
-    for h in REFRESH_HOURS:
+        # 计划执行时间 = 刷新点 - LEAD_MINUTES 分钟
         plan_time = now.replace(hour=h, minute=0, second=0, microsecond=0) - timedelta(minutes=LEAD_MINUTES)
-        # 处理跨日情况（例如 07:58 是当天，但 23:58 是前一天？不，因为刷新点都在同一天）
-        # 但要注意如果 h=8, LEAD=2 => plan_time = 07:58，仍在当天
+        # 允许前后 1 分钟
         plan_start = plan_time - timedelta(minutes=1)
         plan_end = plan_time + timedelta(minutes=1)
         if plan_start <= now <= plan_end:
             print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{plan_time.strftime('%H:%M')} ±1min）")
             return True
 
-    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内（{', '.join([f'{h-1 if LEAD_MINUTES>0 else h}:{60-LEAD_MINUTES}' for h in REFRESH_HOURS])} ±1min）")
+    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内（预期 {', '.join([f'{(h-1) if LEAD_MINUTES>0 else h}:{60-LEAD_MINUTES}' for h in REFRESH_HOURS])} ±1min）")
     return False
 
-# ================= 3. 时间与数据处理逻辑（保持原有功能，微调） =================
+# ================= 3. 时间与数据处理逻辑 =================
 
 def format_timestamp(ts_ms):
     """格式化时间戳为 HH:mm"""
@@ -227,7 +217,7 @@ def process_data_for_template(data):
         "titleIcon": True
     }
 
-# ================= 4. 图像渲染与上传（不变） =================
+# ================= 4. 图像渲染与上传 =================
 
 async def render_to_image(processed_data):
     """渲染 HTML 并精准切割截图"""
@@ -284,7 +274,7 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 5. 推送分发（不变） =================
+# ================= 5. 推送分发 =================
 
 def push_all(title, body, markdown, image_url):
     """执行双通道推送"""
@@ -335,21 +325,25 @@ async def send_to_unicloud(status, message, products=None, img_url=None):
     except Exception as e:
         print(f"❌ uniCloud 上报失败：{str(e)}")
 
-# ================= 7. 主入口（加入时间守卫） =================
+# ================= 7. 主入口（加入时间守卫与手动触发判断） =================
 
 async def main():
-    # 第一步：检查当前时间是否允许执行
-    if not should_execute():
-        print("脚本退出：不在计划执行窗口内")
-        return
+    # 判断触发方式：手动触发则跳过时间守卫
+    if not IS_MANUAL_TRIGGER:
+        if not should_execute():
+            print("脚本退出：不在计划执行窗口内（定时任务触发）")
+            return
+    else:
+        print("ℹ️ 手动触发（workflow_dispatch），忽略时间守卫，立即执行完整流程")
 
     img_url = None
     products = []
     try:
         resp = requests.get(GAME_API_URL, headers={"X-API-Key": ROCOM_API_KEY}, timeout=30)
         resp.raise_for_status()
-        raw_data = resp.json().get("data", {})
-        err = None if resp.json().get("code") == 0 else resp.json().get("message")
+        json_resp = resp.json()
+        raw_data = json_resp.get("data", {})
+        err = None if json_resp.get("code") == 0 else json_resp.get("message")
     except Exception as e:
         raw_data, err = None, f"请求异常: {e}"
     
