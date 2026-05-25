@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,6 @@ ROCOM_API_KEY = os.environ.get("ROCOM_API_KEY")
 IMGBB_KEY = os.environ.get("IMGBB_KEY")
 NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID")
 BARK_KEY = os.environ.get("BARK_KEY")
-# 新增：uniCloud 云函数地址（从GitHub Secrets读取）
 UNICLOUD_URL = os.environ.get("UNICLOUD_URL")
 
 GAME_API_URL = "https://wegame.shallow.ink/api/v1/games/rocom/merchant/info"
@@ -19,16 +19,62 @@ ASSETS_DIR = os.path.abspath("assets/yuanxing-shangren")
 HTML_TEMPLATE_FILE = "index.html"
 TEMP_RENDER_FILE = "temp_render.html"
 
-# ================= 2. 时间与数据处理逻辑 =================
+# 北京时间时区
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 刷新时间点（北京时间）
+REFRESH_HOURS = [8, 12, 16, 20]
+# 提前排队分钟数
+LEAD_MINUTES = 2
+
+# ================= 2. 时间守卫函数 =================
 
 def get_beijing_time():
-    """获取精准的北京时间"""
-    return datetime.now(timezone(timedelta(hours=8)))
+    """获取精准的北京时间（带时区）"""
+    return datetime.now(BEIJING_TZ)
+
+def should_execute() -> bool:
+    """
+    判断当前时间是否在计划执行窗口内：
+    计划执行时间 = 每个刷新时间点 - LEAD_MINUTES 分钟
+    允许前后 1 分钟的误差（防止调度器微小偏差）
+    """
+    now = get_beijing_time()
+    current_hour = now.hour
+    current_minute = now.minute
+
+    # 计算允许执行的时间点列表（例如 07:58, 11:58, 15:58, 19:58）
+    allowed_times = []
+    for h in REFRESH_HOURS:
+        exec_hour = h
+        exec_minute = 60 - LEAD_MINUTES if LEAD_MINUTES > 0 else 0
+        if LEAD_MINUTES > 0:
+            exec_hour = h - 1 if exec_minute == 60 else h
+            exec_minute = exec_minute % 60
+        # 允许范围：计划时间的前后 1 分钟
+        allowed_times.append((exec_hour, exec_minute, -1, 1))  # (hour, minute, delta_before, delta_after)
+
+    # 更精确：直接构造计划时间点，然后判断 now 是否在 [plan-1min, plan+1min]
+    for h in REFRESH_HOURS:
+        plan_time = now.replace(hour=h, minute=0, second=0, microsecond=0) - timedelta(minutes=LEAD_MINUTES)
+        # 处理跨日情况（例如 07:58 是当天，但 23:58 是前一天？不，因为刷新点都在同一天）
+        # 但要注意如果 h=8, LEAD=2 => plan_time = 07:58，仍在当天
+        plan_start = plan_time - timedelta(minutes=1)
+        plan_end = plan_time + timedelta(minutes=1)
+        if plan_start <= now <= plan_end:
+            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{plan_time.strftime('%H:%M')} ±1min）")
+            return True
+
+    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内（{', '.join([f'{h-1 if LEAD_MINUTES>0 else h}:{60-LEAD_MINUTES}' for h in REFRESH_HOURS])} ±1min）")
+    return False
+
+# ================= 3. 时间与数据处理逻辑（保持原有功能，微调） =================
 
 def format_timestamp(ts_ms):
     """格式化时间戳为 HH:mm"""
-    if not ts_ms: return "--:--"
-    dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone(timedelta(hours=8)))
+    if not ts_ms:
+        return "--:--"
+    dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=BEIJING_TZ)
     return dt.strftime("%H:%M")
 
 def get_round_info():
@@ -59,7 +105,8 @@ def get_round_info():
     }
 
 def process_data_for_template(data):
-    if not data: return {}
+    if not data:
+        return {}
     
     now_ms = int(get_beijing_time().timestamp() * 1000)
     round_info = get_round_info()
@@ -67,14 +114,12 @@ def process_data_for_template(data):
     activities = data.get("merchantActivities") or data.get("merchant_activities") or []
     activity = activities[0] if activities else {}
     
-    # 获取三种类型的商品
     buckets = [
         ("道具", activity.get("get_props") or []),
         ("额外道具", activity.get("get_extra_props") or []),
         ("精灵", activity.get("get_pets") or []),
     ]
 
-    # 匹配商品元数据字典 (用于获取价格和限购次数)
     random_goods = data.get("random_goods") if isinstance(data.get("random_goods"), list) else []
     goods_meta_by_name = {
         str(item.get("goods_name", "") or item.get("name", "")).strip(): item
@@ -87,16 +132,18 @@ def process_data_for_template(data):
     
     for category, items in buckets:
         for item in items:
-            if not isinstance(item, dict): continue
+            if not isinstance(item, dict):
+                continue
 
             goods_meta = goods_meta_by_name.get(str(item.get("name", "")).strip(), {})
             
             s_time = item.get("start_time")
             e_time = item.get("end_time")
 
-            # 兜底继承大活动时间
-            if s_time is None: s_time = activity.get("start_time")
-            if e_time is None: e_time = activity.get("end_time")
+            if s_time is None:
+                s_time = activity.get("start_time")
+            if e_time is None:
+                e_time = activity.get("end_time")
 
             start_ms = int(s_time) if s_time else None
             end_ms = int(e_time) if e_time else None
@@ -111,7 +158,6 @@ def process_data_for_template(data):
             elif end_ms is not None and now_ms >= end_ms:
                 status_label = "已结束"
 
-            # 时间标签格式化
             start_str = format_timestamp(start_ms)
             end_str = format_timestamp(end_ms)
             if start_str[:5] == end_str[:5] and start_str != "--:--":
@@ -136,16 +182,19 @@ def process_data_for_template(data):
                 active_products.append(product)
                 
     # 历史记录分组逻辑
-    today = datetime.fromtimestamp(now_ms / 1000, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    today = datetime.fromtimestamp(now_ms / 1000, tz=BEIJING_TZ).strftime("%Y-%m-%d")
     grouped = {}
     
     for product in all_products:
-        if product["is_active"]: continue
+        if product["is_active"]:
+            continue
         start_ms = product["start_ms"]
-        if not start_ms: continue
+        if not start_ms:
+            continue
         
-        start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone(timedelta(hours=8)))
-        if start_dt.strftime("%Y-%m-%d") != today: continue
+        start_dt = datetime.fromtimestamp(start_ms / 1000, tz=BEIJING_TZ)
+        if start_dt.strftime("%Y-%m-%d") != today:
+            continue
 
         key = f"{start_ms}-{product['end_ms'] or ''}"
         if key not in grouped:
@@ -157,7 +206,6 @@ def process_data_for_template(data):
             }
         group = grouped[key]
         names = {p["name"] for p in group["products"]}
-        # 每段最多展示5个不重复商品
         if product["name"] not in names and len(group["products"]) < 5:
             group["products"].append(product)
 
@@ -173,15 +221,13 @@ def process_data_for_template(data):
         "product_count": len(active_products),
         "round_info": round_info,
         "products": active_products,
-        "history_groups": history_groups, # 喂入历史商品数据
-        
-        # 本地资源支持变量
+        "history_groups": history_groups,
         "_res_path": "",
         "background": "img/bg.C8CUoi7I.jpg",
         "titleIcon": True
     }
 
-# ================= 3. 图像渲染与上传 =================
+# ================= 4. 图像渲染与上传（不变） =================
 
 async def render_to_image(processed_data):
     """渲染 HTML 并精准切割截图"""
@@ -203,18 +249,12 @@ async def render_to_image(processed_data):
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            
-            # 维持稳定的 900 宽度，完美规避手机端排版错乱
             await page.set_viewport_size({"width": 900, "height": 1600})
             await page.goto(f"file://{temp_html_path}")
-            
-            # 等待所有图文加载完毕
             await page.evaluate("document.fonts.ready")
             await page.wait_for_load_state("networkidle")
-            
             data_region = page.locator('.merchant-page')
             await data_region.screenshot(path=screenshot_file, type="jpeg", quality=90)
-            
             await browser.close()
             print(f"✅ 图片渲染成功: {screenshot_file}")
             return screenshot_file
@@ -223,11 +263,13 @@ async def render_to_image(processed_data):
         print(f"❌ 渲染图片失败: {e}")
         return None
     finally:
-        if os.path.exists(temp_html_path): os.remove(temp_html_path)
+        if os.path.exists(temp_html_path):
+            os.remove(temp_html_path)
 
 async def upload_to_imgbb(image_path):
     """上传到 ImgBB 图床"""
-    if not image_path or not IMGBB_KEY: return None
+    if not image_path or not IMGBB_KEY:
+        return None
     try:
         with open(image_path, "rb") as f:
             res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_KEY}, files={"image": f}, timeout=30)
@@ -242,7 +284,7 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 4. 推送分发 =================
+# ================= 5. 推送分发（不变） =================
 
 def push_all(title, body, markdown, image_url):
     """执行双通道推送"""
@@ -259,7 +301,8 @@ def push_all(title, body, markdown, image_url):
         try:
             requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
             print("✅ NotifyMe 推送已发送")
-        except: pass
+        except Exception as e:
+            print(f"❌ NotifyMe 推送失败: {e}")
     
     if BARK_KEY:
         try:
@@ -267,23 +310,17 @@ def push_all(title, body, markdown, image_url):
                 "title": title, "body": body, "group": "洛克王国", "image": image_url, "isArchive": 1
             }, timeout=10)
             print("✅ Bark 推送已发送")
-        except: pass
+        except Exception as e:
+            print(f"❌ Bark 推送失败: {e}")
 
-# ================= 新增：上报数据到 uniCloud =================
+# ================= 6. 上报数据到 uniCloud =================
+
 async def send_to_unicloud(status, message, products=None, img_url=None):
-    """
-    自动上报任务执行结果到 uniapp 云开发
-    :param status: 执行状态（成功/失败）
-    :param message: 执行信息
-    :param products: 商品列表
-    :param img_url: 截图地址
-    """
     if not UNICLOUD_URL:
         print("ℹ️ 未配置 uniCloud 地址，跳过上报")
         return
     
     try:
-        # 整理要上报的数据（可自定义）
         report_data = {
             "task_name": "洛克王国远行商人监控",
             "status": status,
@@ -291,21 +328,21 @@ async def send_to_unicloud(status, message, products=None, img_url=None):
             "execute_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
             "current_products": [p["name"] for p in products] if products else [],
             "product_count": len(products) if products else 0,
-            "screenshot_url": img_url  # 上报截图链接
+            "screenshot_url": img_url
         }
-        # 发送到 uniCloud 云函数
-        response = requests.post(
-            UNICLOUD_URL,
-            json=report_data,
-            timeout=15
-        )
+        response = requests.post(UNICLOUD_URL, json=report_data, timeout=15)
         print(f"✅ 已上报数据到 uniCloud：{response.json()}")
     except Exception as e:
         print(f"❌ uniCloud 上报失败：{str(e)}")
 
-# ================= 5. 主入口 =================
+# ================= 7. 主入口（加入时间守卫） =================
 
 async def main():
+    # 第一步：检查当前时间是否允许执行
+    if not should_execute():
+        print("脚本退出：不在计划执行窗口内")
+        return
+
     img_url = None
     products = []
     try:
@@ -318,7 +355,6 @@ async def main():
     
     if err or not raw_data:
         push_all("⚠️ 监控异常", err or "无法获取数据", "无法获取数据", None)
-        # 上报失败结果
         await send_to_unicloud("失败", err or "无法获取数据")
         return
 
@@ -331,8 +367,6 @@ async def main():
     img_url = await upload_to_imgbb(local_img)
     
     push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
-    
-    # 新增：上报成功结果 + 商品数据 + 截图
     await send_to_unicloud("成功", push_body, products, img_url)
 
 if __name__ == "__main__":
