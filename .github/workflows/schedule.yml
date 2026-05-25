@@ -3,8 +3,8 @@ name: Roco Merchant Notifier
 on:
   schedule:
     # 北京时间 08:00, 12:00, 16:00, 20:00 刷新
-    # 提前 5 分钟排队 (对应 UTC 23:55, 3:55, 7:55, 11:55)
-    - cron: '55 23,3,7,11 * * *'
+    # 提前 2 分钟排队 (对应 UTC 23:58, 3:58, 7:58, 11:58)
+    - cron: '58 23,3,7,11 * * *'
   workflow_dispatch: 
 
 jobs:
@@ -27,7 +27,6 @@ jobs:
       - name: Install Playwright Browsers & OS Dependencies
         run: |
           playwright install chromium --with-deps
-          # 加上这行中文字体包作为双保险，防止你的本地字体偶尔加载失败
           sudo apt-get install -y fonts-wqy-zenhei
 
       - name: Run Notifier Script
@@ -36,6 +35,5 @@ jobs:
           IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
           NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
-           # uniCloud 云函数地址（新增）
           UNICLOUD_URL: ${{ secrets.UNICLOUD_URL }}
         run: python main.py
