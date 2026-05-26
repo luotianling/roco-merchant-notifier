@@ -31,7 +31,7 @@ REFRESH_MINUTES = [0, 5, 10]
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 IS_MANUAL_TRIGGER = (GITHUB_EVENT_NAME == "workflow_dispatch")
 
-# ================= 2. 时间守卫函数 =================
+# ================= 2. 时间守卫函数（允许 ±5 分钟误差） =================
 
 def get_beijing_time():
     return datetime.now(BEIJING_TZ)
@@ -40,10 +40,9 @@ def should_execute() -> bool:
     """
     判断当前时间是否在计划执行窗口内：
     计划执行时间 = 每个 (小时, 分钟) 组合
-    允许前后 1 分钟的误差（防止调度器微小偏差）
+    允许前后 5 分钟的误差（适应 GitHub Actions 调度延迟）
     """
     now = get_beijing_time()
-    # 构建所有计划执行时间点
     plan_times = []
     for h in REFRESH_HOURS:
         for m in REFRESH_MINUTES:
@@ -51,9 +50,8 @@ def should_execute() -> bool:
             plan_times.append(plan_time)
 
     for pt in plan_times:
-        # 允许前后 1 分钟
-        if pt - timedelta(minutes=1) <= now <= pt + timedelta(minutes=1):
-            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{pt.strftime('%H:%M')} ±1min）")
+        if pt - timedelta(minutes=5) <= now <= pt + timedelta(minutes=5):
+            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{pt.strftime('%H:%M')} ±5min）")
             return True
 
     print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内")
@@ -278,34 +276,43 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 5. 推送分发（增加价格和限购表格） =================
+# ================= 5. 纯文本消息构建与推送 =================
 
-def build_markdown_table(products):
-    """根据活跃商品列表构建 Markdown 表格，包含价格和限购数"""
+def build_text_product_list(products):
+    """生成纯文本的商品列表（含价格和限购数）"""
     if not products:
-        return "暂无商品信息"
+        return "暂无商品"
     
-    # 表头
-    table = "| 商品名称 | 价格 | 限购数量 |\n"
-    table += "| --- | --- | --- |\n"
+    lines = []
     for p in products:
         name = p.get("name", "未知")
         price = p.get("price")
-        price_str = str(price) if price is not None and price != "" else "—"
+        price_str = str(price) if price is not None and price != "" else "无"
         limit = p.get("buy_limit_num")
-        limit_str = str(limit) if limit is not None and limit != "" else "—"
-        table += f"| {name} | {price_str} | {limit_str} |\n"
-    return table
+        limit_str = str(limit) if limit is not None and limit != "" else "无"
+        lines.append(f"{name} | 价格:{price_str} | 限购:{limit_str}")
+    return "\n".join(lines)
 
-def push_all(title, body, markdown, image_url):
-    """执行双通道推送，markdown 参数现在应包含表格"""
+def push_all(title, body, product_text, image_url):
+    """双通道推送（纯文本，不使用 Markdown）"""
+    full_body = f"{body}\n\n{product_text}"
+    if image_url:
+        full_body += f"\n\n图片: {image_url}"
+    
+    # NotifyMe 推送
     if NOTIFYME_UUID:
         payload = {
             "data": {
-                "uuid": NOTIFYME_UUID, "ttl": 86400, "priority": "high",
+                "uuid": NOTIFYME_UUID,
+                "ttl": 86400,
+                "priority": "high",
                 "data": {
-                    "title": title, "body": body, "group": "洛克王国", "bigText": True, "record": 1,
-                    "markdown": f"{markdown}\n\n![render]({image_url})" if image_url else markdown
+                    "title": title,
+                    "body": full_body,
+                    "group": "洛克王国",
+                    "bigText": True,
+                    "record": 1,
+                    "markdown": ""   # 不使用 markdown
                 }
             }
         }
@@ -315,14 +322,15 @@ def push_all(title, body, markdown, image_url):
         except Exception as e:
             print(f"❌ NotifyMe 推送失败: {e}")
     
+    # Bark 推送
     if BARK_KEY:
         try:
-            # Bark 推送不支持 markdown 表格，但可以把表格当作纯文本发送
-            # 将 markdown 表格转换为纯文本格式（保留换行）
-            plain_table = markdown.replace("|", " ").replace(" --- ", " ").strip()
-            full_message = f"{body}\n\n{plain_table}"
             requests.post(f"https://api.day.app/{BARK_KEY}", data={
-                "title": title, "body": full_message, "group": "洛克王国", "image": image_url, "isArchive": 1
+                "title": title,
+                "body": full_body,
+                "group": "洛克王国",
+                "image": image_url,   # Bark 支持直接显示图片
+                "isArchive": 1
             }, timeout=10)
             print("✅ Bark 推送已发送")
         except Exception as e:
@@ -354,6 +362,9 @@ async def send_to_unicloud(status, message, products=None, img_url=None):
 # ================= 7. 主入口 =================
 
 async def main():
+    # 打印启动时间便于调试
+    print(f"=== 任务启动，北京时间: {get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    
     if not IS_MANUAL_TRIGGER:
         if not should_execute():
             print("脚本退出：不在计划执行窗口内（定时任务触发）")
@@ -373,27 +384,25 @@ async def main():
         raw_data, err = None, f"请求异常: {e}"
     
     if err or not raw_data:
-        push_all("⚠️ 监控异常", err or "无法获取数据", "无法获取数据", None)
+        push_all("⚠️ 监控异常", err or "无法获取数据", "无商品数据", None)
         await send_to_unicloud("失败", err or "无法获取数据")
         return
 
     processed = process_data_for_template(raw_data)
     products = processed["products"]
     
-    # 构建推送正文和Markdown表格
     if products:
         item_names = [p["name"] for p in products]
         push_body = f"当前售卖: {'、'.join(item_names)}"
-        markdown_table = build_markdown_table(products)
-        markdown_content = f"### 🛒 远行商人已刷新\n\n{markdown_table}"
+        product_text = build_text_product_list(products)
     else:
         push_body = "当前暂无商品"
-        markdown_content = "### 🛒 远行商人已刷新\n\n当前暂无活跃商品"
+        product_text = "无活跃商品"
     
     local_img = await render_to_image(processed)
     img_url = await upload_to_imgbb(local_img)
     
-    push_all("📢 远行商人刷新提醒", push_body, markdown_content, img_url)
+    push_all("📢 远行商人刷新提醒", push_body, product_text, img_url)
     await send_to_unicloud("成功", push_body, products, img_url)
 
 if __name__ == "__main__":
