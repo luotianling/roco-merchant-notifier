@@ -22,42 +22,14 @@ TEMP_RENDER_FILE = "temp_render.html"
 # 北京时间时区
 BEIJING_TZ = timezone(timedelta(hours=8))
 
-# 刷新时间点（北京时间小时）
-REFRESH_HOURS = [8, 12, 16, 20]
-# 每个小时内的执行分钟数（整点、5分、10分）
-REFRESH_MINUTES = [0, 5, 10]
-
 # GitHub Actions 事件类型
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 IS_MANUAL_TRIGGER = (GITHUB_EVENT_NAME == "workflow_dispatch")
 
-# ================= 2. 时间守卫函数（允许 ±5 分钟误差） =================
+# ================= 2. 时间与数据处理逻辑 =================
 
 def get_beijing_time():
     return datetime.now(BEIJING_TZ)
-
-def should_execute() -> bool:
-    """
-    判断当前时间是否在计划执行窗口内：
-    计划执行时间 = 每个 (小时, 分钟) 组合
-    允许前后 5 分钟的误差（适应 GitHub Actions 调度延迟）
-    """
-    now = get_beijing_time()
-    plan_times = []
-    for h in REFRESH_HOURS:
-        for m in REFRESH_MINUTES:
-            plan_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            plan_times.append(plan_time)
-
-    for pt in plan_times:
-        if pt - timedelta(minutes=5) <= now <= pt + timedelta(minutes=5):
-            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{pt.strftime('%H:%M')} ±5min）")
-            return True
-
-    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内")
-    return False
-
-# ================= 3. 时间与数据处理逻辑 =================
 
 def format_timestamp(ts_ms):
     if not ts_ms:
@@ -219,7 +191,7 @@ def process_data_for_template(data):
         "titleIcon": True
     }
 
-# ================= 4. 图像渲染与上传 =================
+# ================= 3. 图像渲染与上传 =================
 
 async def render_to_image(processed_data):
     """渲染 HTML 并精准切割截图"""
@@ -276,7 +248,7 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 5. 纯文本消息构建与推送 =================
+# ================= 4. 纯文本消息构建与推送 =================
 
 def build_text_product_list(products):
     """生成纯文本的商品列表（含价格和限购数）"""
@@ -336,7 +308,7 @@ def push_all(title, body, product_text, image_url):
         except Exception as e:
             print(f"❌ Bark 推送失败: {e}")
 
-# ================= 6. 上报数据到 uniCloud =================
+# ================= 5. 上报数据到 uniCloud =================
 
 async def send_to_unicloud(status, message, products=None, img_url=None):
     if not UNICLOUD_URL:
@@ -359,18 +331,15 @@ async def send_to_unicloud(status, message, products=None, img_url=None):
     except Exception as e:
         print(f"❌ uniCloud 上报失败：{str(e)}")
 
-# ================= 7. 主入口 =================
+# ================= 6. 主入口 =================
 
 async def main():
-    # 打印启动时间便于调试
     print(f"=== 任务启动，北京时间: {get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')} ===")
     
-    if not IS_MANUAL_TRIGGER:
-        if not should_execute():
-            print("脚本退出：不在计划执行窗口内（定时任务触发）")
-            return
+    if IS_MANUAL_TRIGGER:
+        print("ℹ️ 手动触发（workflow_dispatch），执行完整流程")
     else:
-        print("ℹ️ 手动触发（workflow_dispatch），忽略时间守卫，立即执行完整流程")
+        print("ℹ️ 定时触发（schedule），直接执行任务（已移除时间守卫）")
 
     img_url = None
     products = []
