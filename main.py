@@ -22,46 +22,46 @@ TEMP_RENDER_FILE = "temp_render.html"
 # 北京时间时区
 BEIJING_TZ = timezone(timedelta(hours=8))
 
-# 刷新时间点（北京时间）
+# 刷新时间点（北京时间小时）
 REFRESH_HOURS = [8, 12, 16, 20]
-# 提前排队分钟数（改为2）
-LEAD_MINUTES = 2
+# 每个小时内的执行分钟数（整点、5分、10分）
+REFRESH_MINUTES = [0, 5, 10]
 
-# GitHub Actions 事件类型（用于区分定时/手动）
+# GitHub Actions 事件类型
 GITHUB_EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 IS_MANUAL_TRIGGER = (GITHUB_EVENT_NAME == "workflow_dispatch")
 
 # ================= 2. 时间守卫函数 =================
 
 def get_beijing_time():
-    """获取精准的北京时间（带时区）"""
     return datetime.now(BEIJING_TZ)
 
 def should_execute() -> bool:
     """
     判断当前时间是否在计划执行窗口内：
-    计划执行时间 = 每个刷新时间点 - LEAD_MINUTES 分钟
+    计划执行时间 = 每个 (小时, 分钟) 组合
     允许前后 1 分钟的误差（防止调度器微小偏差）
     """
     now = get_beijing_time()
-    # 构造计划执行时间点
+    # 构建所有计划执行时间点
+    plan_times = []
     for h in REFRESH_HOURS:
-        # 计划执行时间 = 刷新点 - LEAD_MINUTES 分钟
-        plan_time = now.replace(hour=h, minute=0, second=0, microsecond=0) - timedelta(minutes=LEAD_MINUTES)
+        for m in REFRESH_MINUTES:
+            plan_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            plan_times.append(plan_time)
+
+    for pt in plan_times:
         # 允许前后 1 分钟
-        plan_start = plan_time - timedelta(minutes=1)
-        plan_end = plan_time + timedelta(minutes=1)
-        if plan_start <= now <= plan_end:
-            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{plan_time.strftime('%H:%M')} ±1min）")
+        if pt - timedelta(minutes=1) <= now <= pt + timedelta(minutes=1):
+            print(f"✅ 时间守卫通过：当前北京时间 {now.strftime('%H:%M')} 在计划执行窗口内（{pt.strftime('%H:%M')} ±1min）")
             return True
 
-    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内（预期 {', '.join([f'{(h-1) if LEAD_MINUTES>0 else h}:{60-LEAD_MINUTES}' for h in REFRESH_HOURS])} ±1min）")
+    print(f"⏭️ 时间守卫拦截：当前北京时间 {now.strftime('%H:%M:%S')} 不在任何计划执行窗口内")
     return False
 
 # ================= 3. 时间与数据处理逻辑 =================
 
 def format_timestamp(ts_ms):
-    """格式化时间戳为 HH:mm"""
     if not ts_ms:
         return "--:--"
     dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=BEIJING_TZ)
@@ -85,7 +85,6 @@ def get_round_info():
     remaining = round_end - now
     hours, rem = divmod(int(remaining.total_seconds()), 3600)
     minutes, _ = divmod(rem, 60)
-    
     countdown_str = f"{hours}小时{minutes}分钟" if hours > 0 else f"{minutes}分钟"
     
     return {
@@ -155,6 +154,14 @@ def process_data_for_template(data):
             else:
                 time_label = f"{start_str} - {end_str}"
 
+            # 获取价格和限购数量
+            price = item.get("price")
+            if price is None or price == "":
+                price = goods_meta.get("price")
+            buy_limit = item.get("buy_limit_num")
+            if buy_limit is None or buy_limit == "":
+                buy_limit = goods_meta.get("buy_limit_num")
+
             product = {
                 "name": item.get("name", "未知商品"),
                 "image": item.get("icon_url", ""),
@@ -163,29 +170,26 @@ def process_data_for_template(data):
                 "end_ms": end_ms,
                 "is_active": is_active,
                 "status_label": status_label,
-                "price": item.get("price") if item.get("price") not in (None, "") else goods_meta.get("price"),
-                "buy_limit_num": item.get("buy_limit_num") if item.get("buy_limit_num") not in (None, "") else goods_meta.get("buy_limit_num")
+                "price": price,
+                "buy_limit_num": buy_limit
             }
             
             all_products.append(product)
             if is_active:
                 active_products.append(product)
                 
-    # 历史记录分组逻辑
+    # 历史记录分组逻辑（保持不变）
     today = datetime.fromtimestamp(now_ms / 1000, tz=BEIJING_TZ).strftime("%Y-%m-%d")
     grouped = {}
-    
     for product in all_products:
         if product["is_active"]:
             continue
         start_ms = product["start_ms"]
         if not start_ms:
             continue
-        
         start_dt = datetime.fromtimestamp(start_ms / 1000, tz=BEIJING_TZ)
         if start_dt.strftime("%Y-%m-%d") != today:
             continue
-
         key = f"{start_ms}-{product['end_ms'] or ''}"
         if key not in grouped:
             grouped[key] = {
@@ -207,7 +211,7 @@ def process_data_for_template(data):
             
     return {
         "title": activity.get("name", "远行商人"),
-        "subtitle": activity.get("start_date", "每日 08:00 / 12:00 / 16:00 / 20:00 刷新"),
+        "subtitle": activity.get("start_date", "每日 08:00/08:05/08:10 / 12:00/12:05/12:10 / 16:00/16:05/16:10 / 20:00/20:05/20:10 刷新"),
         "product_count": len(active_products),
         "round_info": round_info,
         "products": active_products,
@@ -274,10 +278,27 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 5. 推送分发 =================
+# ================= 5. 推送分发（增加价格和限购表格） =================
+
+def build_markdown_table(products):
+    """根据活跃商品列表构建 Markdown 表格，包含价格和限购数"""
+    if not products:
+        return "暂无商品信息"
+    
+    # 表头
+    table = "| 商品名称 | 价格 | 限购数量 |\n"
+    table += "| --- | --- | --- |\n"
+    for p in products:
+        name = p.get("name", "未知")
+        price = p.get("price")
+        price_str = str(price) if price is not None and price != "" else "—"
+        limit = p.get("buy_limit_num")
+        limit_str = str(limit) if limit is not None and limit != "" else "—"
+        table += f"| {name} | {price_str} | {limit_str} |\n"
+    return table
 
 def push_all(title, body, markdown, image_url):
-    """执行双通道推送"""
+    """执行双通道推送，markdown 参数现在应包含表格"""
     if NOTIFYME_UUID:
         payload = {
             "data": {
@@ -296,8 +317,12 @@ def push_all(title, body, markdown, image_url):
     
     if BARK_KEY:
         try:
+            # Bark 推送不支持 markdown 表格，但可以把表格当作纯文本发送
+            # 将 markdown 表格转换为纯文本格式（保留换行）
+            plain_table = markdown.replace("|", " ").replace(" --- ", " ").strip()
+            full_message = f"{body}\n\n{plain_table}"
             requests.post(f"https://api.day.app/{BARK_KEY}", data={
-                "title": title, "body": body, "group": "洛克王国", "image": image_url, "isArchive": 1
+                "title": title, "body": full_message, "group": "洛克王国", "image": image_url, "isArchive": 1
             }, timeout=10)
             print("✅ Bark 推送已发送")
         except Exception as e:
@@ -318,17 +343,17 @@ async def send_to_unicloud(status, message, products=None, img_url=None):
             "execute_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
             "current_products": [p["name"] for p in products] if products else [],
             "product_count": len(products) if products else 0,
-            "screenshot_url": img_url
+            "screenshot_url": img_url,
+            "products_detail": [{"name": p["name"], "price": p.get("price"), "limit": p.get("buy_limit_num")} for p in products] if products else []
         }
         response = requests.post(UNICLOUD_URL, json=report_data, timeout=15)
         print(f"✅ 已上报数据到 uniCloud：{response.json()}")
     except Exception as e:
         print(f"❌ uniCloud 上报失败：{str(e)}")
 
-# ================= 7. 主入口（加入时间守卫与手动触发判断） =================
+# ================= 7. 主入口 =================
 
 async def main():
-    # 判断触发方式：手动触发则跳过时间守卫
     if not IS_MANUAL_TRIGGER:
         if not should_execute():
             print("脚本退出：不在计划执行窗口内（定时任务触发）")
@@ -354,13 +379,21 @@ async def main():
 
     processed = process_data_for_template(raw_data)
     products = processed["products"]
-    item_names = [p["name"] for p in products]
-    push_body = f"当前售卖: {'、'.join(item_names)}" if item_names else "当前暂无商品"
+    
+    # 构建推送正文和Markdown表格
+    if products:
+        item_names = [p["name"] for p in products]
+        push_body = f"当前售卖: {'、'.join(item_names)}"
+        markdown_table = build_markdown_table(products)
+        markdown_content = f"### 🛒 远行商人已刷新\n\n{markdown_table}"
+    else:
+        push_body = "当前暂无商品"
+        markdown_content = "### 🛒 远行商人已刷新\n\n当前暂无活跃商品"
     
     local_img = await render_to_image(processed)
     img_url = await upload_to_imgbb(local_img)
     
-    push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
+    push_all("📢 远行商人刷新提醒", push_body, markdown_content, img_url)
     await send_to_unicloud("成功", push_body, products, img_url)
 
 if __name__ == "__main__":
