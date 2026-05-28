@@ -312,6 +312,13 @@ async def main():
     img_url = await upload_to_imgbb(local_img)
     
     push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
+    # ✅ 关键：上报数据到 uniCloud
+    await send_to_unicloud(
+        status="success",
+        message="数据获取成功",
+        products=processed["products"],
+        img_url=img_url
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
