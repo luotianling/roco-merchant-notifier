@@ -1,11 +1,11 @@
 name: Roco Merchant Notifier
 
 on:
-   # schedule:
-    # 北京时间 08:00,08:05,08:10 / 12:00,12:05,12:10 / 16:00,16:05,16:10 / 20:00,20:05,20:10
-    # 对应 UTC 00:00,00:05,00:10 / 04:00,04:05,04:10 / 08:00,08:05,08:10 / 12:00,12:05,12:10
-    #  - cron: '0,5,10 0,4,8,12 * * *'
-  workflow_dispatch:   # 允许手动触发
+  #schedule:
+    # 北京时间 08:00, 12:00, 16:00, 20:00 刷新
+    # 提前 5 分钟排队 (对应 UTC 23:55, 3:55, 7:55, 11:55)
+    #- cron: '55 23,3,7,11 * * *'
+  workflow_dispatch: 
 
 jobs:
   run-notifier:
@@ -27,6 +27,7 @@ jobs:
       - name: Install Playwright Browsers & OS Dependencies
         run: |
           playwright install chromium --with-deps
+          # 加上这行中文字体包作为双保险，防止你的本地字体偶尔加载失败
           sudo apt-get install -y fonts-wqy-zenhei
 
       - name: Run Notifier Script
